@@ -30,6 +30,7 @@ export type WGLDrawModeValue = (
     'LINE_STRIP' |
     'LINES' |
     'POINTS' |
+    'TRIANGLE_STRIP' |
     'TRIANGLES'
 );
 
@@ -46,7 +47,7 @@ const WGLDrawMode: Record<keyof SeriesTypeRegistry, WGLDrawModeValue> = {
     'column': 'LINES',
     'columnrange': 'LINES',
     'bar': 'LINES',
-    'line': 'LINE_STRIP',
+    'line': 'TRIANGLE_STRIP',
     'scatter': 'POINTS',
     'heatmap': 'TRIANGLES',
     'treemap': 'TRIANGLES',

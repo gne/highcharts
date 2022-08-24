@@ -83,6 +83,9 @@ const vertexShader = [
     'precision highp float;',
 
     'attribute vec4 aVertexPosition;',
+    'attribute vec4 aVertexPosition_n;',
+    'attribute vec4 aVertexPosition_p;',
+    'attribute float aNormalDirection;',
     'attribute vec4 aColor;',
 
     'varying highp vec2 position;',
@@ -90,6 +93,8 @@ const vertexShader = [
 
     'uniform mat4 uPMatrix;',
     'uniform float pSize;',
+    'uniform float uLineRender;',
+    'uniform float uLineWidth;',
 
     'uniform float translatedThreshold;',
     'uniform bool hasThreshold;',
@@ -217,6 +222,21 @@ const vertexShader = [
         'return v;',
     '}',
 
+    'vec4 getPosition(vec4 vertexPosition) {',
+        'vec4 position;',
+        'if (skipTranslation && isInverted) {',
+            // If we get translated values from JS, just swap them (x, y)
+            'position = vec4(vertexPosition.y + yAxisPos, vertexPosition.x + xAxisPos, 0.0, 1.0);',
+        '} else if (isInverted) {',
+            // But when calculating pixel positions directly,
+            // swap axes and values (x, y)
+            'position = vec4(yToPixels(vertexPosition.y, vertexPosition.z) + yAxisPos, xToPixels(vertexPosition.x) + xAxisPos, 0.0, 1.0);',
+        '} else {',
+            'position = vec4(xToPixels(vertexPosition.x) + xAxisPos, yToPixels(vertexPosition.y, vertexPosition.z) + yAxisPos, 0.0, 1.0);',
+        '}',
+        'return position;',
+    '}',
+
     'void main(void) {',
         'if (isBubble){',
             'gl_PointSize = bubbleRadius();',
@@ -226,17 +246,52 @@ const vertexShader = [
         // 'gl_PointSize = 10.0;',
         'vColor = aColor;',
 
-        'if (skipTranslation && isInverted) {',
-            // If we get translated values from JS, just swap them (x, y)
-            'gl_Position = uPMatrix * vec4(aVertexPosition.y + yAxisPos, aVertexPosition.x + xAxisPos, 0.0, 1.0);',
-        '} else if (isInverted) {',
-            // But when calculating pixel positions directly,
-            // swap axes and values (x, y)
-            'gl_Position = uPMatrix * vec4(yToPixels(aVertexPosition.y, aVertexPosition.z) + yAxisPos, xToPixels(aVertexPosition.x) + xAxisPos, 0.0, 1.0);',
+        'vec4 position = getPosition(aVertexPosition);',
+
+        // Line rendering using TRIANGLE_STRIP
+        'if (uLineRender == 1.0) {',
+            'vec4 p1 = getPosition(aVertexPosition_p) * 10000.0;',
+            'vec4 p2 = position * 10000.0;',
+            'vec4 p3 = getPosition(aVertexPosition_n) * 10000.0;',
+
+            // Find vertex normal
+            'vec2 v1 = normalize(vec2(p2.x-p1.x, p2.y-p1.y));',
+            'vec2 v2 = normalize(vec2(p3.x-p2.x, p3.y-p2.y));',
+            'vec2 edgeNormal1 = vec2(v1.y, -v1.x);',
+            'vec2 edgeNormal2 = vec2(v2.y, -v2.x);',
+            'vec2 vertexNormal = vec2(0.0, 0.0);',
+            'if (length(edgeNormal1) > 0.0) {',
+                'vertexNormal += normalize(edgeNormal1);',
+            '}',
+            'if (length(edgeNormal2) > 0.0) {',
+                'vertexNormal += normalize(edgeNormal2);',
+            '}',
+            'vertexNormal = normalize(vertexNormal);',
+
+            // Calculate length of vertex normal
+            'vec2 referenceEdge;',
+            'if (length(v1) > 0.0) {',
+                'referenceEdge = normalize(v1);',
+            '} else {',
+                'referenceEdge = normalize(v2);',
+            '}',
+            'float angle = acos(dot(referenceEdge, vertexNormal));',
+            'float vertexNormalLength = (uLineWidth/2.0) / sin(angle);',
+            // Work-around to avoid too long "spikes". This needs to be fixed.
+            'vertexNormalLength = min(uLineWidth*10.0, vertexNormalLength);',
+            'vertexNormal *= vertexNormalLength;',
+
+            // Even/odd vertices are positioned to the left/right
+            'vec2 offset = vertexNormal * aNormalDirection;',
+
+            'gl_Position = uPMatrix * vec4(',
+                'position.x + offset.x,',
+                'position.y + offset.y,',
+                'position.zw',
+            ');',
         '} else {',
-            'gl_Position = uPMatrix * vec4(xToPixels(aVertexPosition.x) + xAxisPos, yToPixels(aVertexPosition.y, aVertexPosition.z) + yAxisPos, 0.0, 1.0);',
+            'gl_Position = uPMatrix * position;',
         '}',
-        // 'gl_Position = uPMatrix * vec4(aVertexPosition.x, aVertexPosition.y, 0.0, 1.0);',
     '}'
     /* eslint-enable max-len, @typescript-eslint/indent */
 ].join('\n');

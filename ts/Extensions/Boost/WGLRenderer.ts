@@ -139,6 +139,50 @@ const contexts = [
     'webkit-3d'
 ];
 
+const previousVertexList = (
+    array: Float32Array,
+    padding: number
+): Float32Array => {
+    let newArray = new Float32Array(array.length);
+    newArray.set(array.slice(0, padding));
+    newArray.set(array.slice(0, array.length - padding), padding);
+    return newArray;
+};
+
+const nextVertexList = (
+    array: Float32Array,
+    padding: number
+): Float32Array => {
+    let newArray = new Float32Array(array.length);
+    newArray.set(array.slice(padding));
+    newArray.set(array.slice(array.length - padding), array.length - padding);
+    return newArray;
+};
+
+const doubleVertexArr = (
+    array: Float32Array | number[],
+    components: number
+): Float32Array => {
+    let doubledArray = new Float32Array(array.length * 2);
+    for (let i = 0; i < array.length; i += components) {
+        for (let j = 0; j < components; j++) {
+            let value = array[i + j];
+            doubledArray[i * 2 + j] = value;
+            doubledArray[i * 2 + j + components] = value;
+        }
+    }
+    return doubledArray;
+};
+
+// Should be a smaller type (Int8?), support required in WGLVertexBuffer
+const normalDirectionArr = (length: number): Float32Array => {
+    let array = new Float32Array(length);
+    for (let i = 0; i < length; i++) {
+        array[i] = (i % 2 === 0) ? 1 : -1;
+    }
+    return array;
+};
+
 /* *
  *
  *  Class
@@ -257,6 +301,9 @@ class WGLRenderer {
     // The data to render - array of coordinates
     private data: Array<number> = [];
 
+    // Preallocated Float32Array
+    private preAllocated?: Float32Array;
+
     // Height of our viewport in pixels
     private height = 0;
 
@@ -281,7 +328,7 @@ class WGLRenderer {
     private textureHandles: Record<string, WGLTextureObject> = {};
 
     // Vertex buffers - keyed on shader attribute name
-    private vbuffer?: WGLVertexBuffer;
+    private vertexBuffers: { [key: string]: WGLVertexBuffer } = {};
 
     // Width of our viewport in pixels
     private width = 0;
@@ -318,40 +365,34 @@ class WGLRenderer {
      * @private
      */
     public allocateBuffer(chart: Chart): void {
-        const vbuffer = this.vbuffer;
-
-        let s = 0;
-
         if (!this.settings.usePreallocated) {
             return;
         }
 
+        let size = 0;
         chart.series.forEach((series: Series): void => {
             if (series.boosted) {
-                s += WGLRenderer.seriesPointCount(series);
+                size += WGLRenderer.seriesPointCount(series);
             }
         });
 
-        vbuffer && vbuffer.allocate(s);
+        this.preAllocated = new Float32Array(size * 4);
     }
 
     /**
      * @private
      */
     public allocateBufferForSingleSeries(series: Series): void {
-        const vbuffer = this.vbuffer;
-
-        let s = 0;
-
         if (!this.settings.usePreallocated) {
             return;
         }
 
+        let size = 0;
         if (series.boosted) {
-            s = WGLRenderer.seriesPointCount(series);
+            size = WGLRenderer.seriesPointCount(series);
         }
 
-        vbuffer && vbuffer.allocate(s);
+        this.preAllocated = new Float32Array(size * 4);
     }
 
     /**
@@ -375,8 +416,8 @@ class WGLRenderer {
         inst: WGLSeriesObject
     ): void {
         const data = this.data,
+            preAllocated = this.preAllocated,
             settings = this.settings,
-            vbuffer = this.vbuffer,
             isRange = (
                 series.pointArrayMap &&
                 series.pointArrayMap.join(',') === 'low,high'
@@ -542,9 +583,11 @@ class WGLRenderer {
                 pointSize *= pixelRatio;
             }
 
-            if (settings.usePreallocated && vbuffer) {
-                vbuffer.push(x, y, checkTreshold ? 1 : 0, pointSize);
-                vlen += 4;
+            if (settings.usePreallocated && preAllocated) {
+                preAllocated[vlen++] = x;
+                preAllocated[vlen++] = y;
+                preAllocated[vlen++] = checkTreshold ? 1 : 0;
+                preAllocated[vlen++] = pointSize;
             } else {
                 data.push(x);
                 data.push(y);
@@ -1159,7 +1202,7 @@ class WGLRenderer {
                 s.options.marker.enabled !== false :
                 false,
             showMarkers: true,
-            drawMode: WGLDrawMode[s.type] || 'LINE_STRIP'
+            drawMode: WGLDrawMode[s.type] || 'TRIANGLE_STRIP'
         };
 
         if (s.index >= series.length) {
@@ -1183,15 +1226,20 @@ class WGLRenderer {
      * @private
      */
     private flush(): void {
-        const vbuffer = this.vbuffer;
-
         this.data = [];
         this.markerData = [];
         this.series = [];
 
-        if (vbuffer) {
-            vbuffer.destroy();
+        /* eslint-disable guard-for-in */
+        const vBuffers = this.vertexBuffers;
+        for (let buffer in vBuffers) {
+            // Make eslint happy (TS shoud detect this?)
+            if ((vBuffers[buffer] as any).destroy) {
+                vBuffers[buffer].destroy();
+                delete vBuffers[buffer];
+            }
         }
+        /* eslint-enable guard-for-in */
     }
 
     /**
@@ -1265,6 +1313,40 @@ class WGLRenderer {
         shader.setUniform('translatedThreshold', translation);
     }
 
+
+    /**
+     * Get or create a vertex buffer
+     *
+     * @private
+     * @param {string} key
+     * Index key for vertex buffer
+     * @param { number[] | Float32Array[] } data
+     * Vertex buffer data
+     */
+    private getVertexBuffer(key: string): WGLVertexBuffer | undefined;
+    private getVertexBuffer(
+        key: string,
+        componentCount: number,
+        data: number[] | Float32Array
+    ): WGLVertexBuffer;
+    private getVertexBuffer(
+        key: string,
+        componentCount?: number,
+        data?: number[] | Float32Array
+    ): WGLVertexBuffer {
+        const gl = this.gl as WebGLRenderingContext;
+        const shader = this.shader as WGLShader;
+
+        let vbuffer = this.vertexBuffers[key];
+        if (!vbuffer && componentCount && data) {
+            vbuffer = new WGLVertexBuffer(gl, shader, componentCount, data);
+            this.vertexBuffers[key] = vbuffer;
+            vbuffer.build();
+        }
+        return vbuffer;
+    }
+
+
     /**
      * Render the data
      * This renders all pushed series.
@@ -1273,8 +1355,7 @@ class WGLRenderer {
     private renderChart(chart: Chart): (false|undefined) {
         const gl = this.gl,
             settings = this.settings,
-            shader = this.shader,
-            vbuffer = this.vbuffer;
+            shader = this.shader;
 
         const pixelRatio = this.getPixelRatio();
         if (chart) {
@@ -1305,11 +1386,6 @@ class WGLRenderer {
 
         if (settings.lineWidth > 1 && !H.isMS) {
             gl.lineWidth(settings.lineWidth);
-        }
-
-        if (vbuffer) {
-            vbuffer.build(this.data, 'aVertexPosition', 4);
-            vbuffer.bind();
         }
 
         shader.setInverted(chart.inverted as any);
@@ -1346,7 +1422,6 @@ class WGLRenderer {
                 ] || this.textureHandles.circle;
 
             let sindex,
-                cbuffer,
                 fillColor,
                 scolor = [];
 
@@ -1433,9 +1508,8 @@ class WGLRenderer {
             // If there are entries in the colorData buffer, build and bind it.
             if (s.colorData.length > 0) {
                 shader.setUniform('hasColor', 1.0);
-                cbuffer = new WGLVertexBuffer(gl, shader);
-                cbuffer.build(s.colorData, 'aColor', 4);
-                cbuffer.bind();
+                const cbuffer = this.getVertexBuffer('cData', 4, s.colorData);
+                cbuffer.bind('aColor');
             } else {
                 // #15869, a buffer with fewer points might already be bound by
                 // a different series/chart causing out of range errors
@@ -1474,20 +1548,71 @@ class WGLRenderer {
                 asCircle[s.series.type] || false
             );
 
-            if (!vbuffer) {
-                return;
-            }
-
             // Do the actual rendering
             // If the line width is < 0, skip rendering of the lines. See #7833.
-            if (lineWidth > 0 || s.drawMode !== 'LINE_STRIP') {
+            if (s.drawMode !== 'TRIANGLE_STRIP') {
                 for (sindex = 0; sindex < s.segments.length; sindex++) {
+                    let vbuffer = this.getVertexBuffer(
+                        'default',
+                        4,
+                        this.preAllocated ?? this.data
+                    );
+                    vbuffer.bind('aVertexPosition');
                     vbuffer.render(
                         s.segments[sindex].from,
                         s.segments[sindex].to,
                         s.drawMode
                     );
                 }
+            } else if (lineWidth > 0) {
+                // Draw lines using TRIANGLE_STRIP
+                shader.setUniform('uLineWidth', lineWidth);
+                shader.setUniform('uLineRender', 1);
+                for (sindex = 0; sindex < s.segments.length; sindex++) {
+                    let dblVBuffer = this.getVertexBuffer(
+                        'double',
+                        4,
+                        doubleVertexArr(this.preAllocated ?? this.data, 4)
+                    );
+                    dblVBuffer.bind('aVertexPosition');
+
+                    let previousVertexBuffer = this.getVertexBuffer('prev');
+                    if (!previousVertexBuffer) {
+                        previousVertexBuffer = this.getVertexBuffer(
+                            'previous',
+                            4,
+                            previousVertexList(dblVBuffer.typedArray, 4 * 2)
+                        );
+                    }
+                    previousVertexBuffer.bind('aVertexPosition_p');
+
+                    let nextVertexBuffer = this.getVertexBuffer('next');
+                    if (!nextVertexBuffer) {
+                        nextVertexBuffer = this.getVertexBuffer(
+                            'next',
+                            4,
+                            nextVertexList(dblVBuffer.typedArray, 4 * 2)
+                        );
+                    }
+                    nextVertexBuffer.bind('aVertexPosition_n');
+
+                    let normalDirectionBuffer = this.getVertexBuffer('normal');
+                    if (!normalDirectionBuffer) {
+                        normalDirectionBuffer = this.getVertexBuffer(
+                            'normal',
+                            1,
+                            normalDirectionArr((dblVBuffer.typedArray).length)
+                        );
+                    }
+                    normalDirectionBuffer.bind('aNormalDirection');
+
+                    dblVBuffer.render(
+                        s.segments[sindex].from * 2,
+                        s.segments[sindex].to * 2,
+                        s.drawMode
+                    );
+                }
+                shader.setUniform('uLineRender', 0);
             }
 
             if (s.hasMarkers && showMarkers) {
@@ -1498,6 +1623,12 @@ class WGLRenderer {
 
                 shader.setDrawAsCircle(true);
                 for (sindex = 0; sindex < s.segments.length; sindex++) {
+                    let vbuffer = this.getVertexBuffer(
+                        'default',
+                        4,
+                        this.preAllocated ?? this.data
+                    );
+                    vbuffer.bind('aVertexPosition');
                     vbuffer.render(
                         s.segments[sindex].from,
                         s.segments[sindex].to,
@@ -1607,8 +1738,6 @@ class WGLRenderer {
             // We need to abort, there's no shader context
             return false;
         }
-
-        this.vbuffer = new WGLVertexBuffer(gl, shader);
 
         const createTexture = (
             name: string,
@@ -1747,21 +1876,27 @@ class WGLRenderer {
      */
     public destroy(): void {
         const gl = this.gl,
-            shader = this.shader,
-            vbuffer = this.vbuffer;
+            shader = this.shader;
 
         this.flush();
 
-        if (vbuffer) {
-            vbuffer.destroy();
+
+        /* eslint-disable guard-for-in */
+        const vBuffers = this.vertexBuffers;
+        for (let buffer in vBuffers) {
+            // Make eslint happy (TS shoud detect this?)
+            if ((vBuffers[buffer] as any).destroy) {
+                vBuffers[buffer].destroy();
+                delete vBuffers[buffer];
+            }
         }
+        /* eslint-enable guard-for-in */
 
         if (shader) {
             shader.destroy();
         }
 
         if (gl) {
-
             objectEach(this.textureHandles, (texture): void => {
                 if (texture.handle) {
                     gl.deleteTexture(texture.handle);

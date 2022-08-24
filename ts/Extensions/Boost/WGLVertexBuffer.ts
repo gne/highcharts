@@ -52,13 +52,18 @@ class WGLVertexBuffer {
     public constructor(
         gl: WebGLRenderingContext,
         shader: WGLShader,
-        dataComponents?: number
+        public dataComponents: number,
+        data: Float32Array | number[]
         /* , type */
     ) {
         this.components = dataComponents || 2;
         this.dataComponents = dataComponents;
         this.gl = gl;
         this.shader = shader;
+
+        // Should ideally support other typed arrays too
+        this.typedArray = (data instanceof Float32Array) ?
+            data : new Float32Array(data);
     }
 
     /* *
@@ -69,21 +74,13 @@ class WGLVertexBuffer {
 
     private buffer: (false|WebGLBuffer|null) = false;
 
+    public typedArray: Float32Array;
+
     private components: number;
-
-    public data: (Array<number>|undefined);
-
-    private dataComponents?: number;
-
-    private iterator = 0;
 
     private gl: WebGLRenderingContext;
 
-    private preAllocated: (false|Float32Array) = false;
-
     private shader: WGLShader;
-
-    private vertAttribute: (false|number) = false;
 
     /* *
      *
@@ -92,90 +89,59 @@ class WGLVertexBuffer {
      * */
 
     /**
-     * Note about pre-allocated buffers:
-     *     - This is slower for charts with many series
-     * @private
-     */
-    public allocate(
-        size: number
-    ): void {
-        this.iterator = -1;
-        this.preAllocated = new Float32Array(size * 4);
-    }
-
-    /**
-     * Bind the buffer
-     * @private
-     */
-    public bind(): (boolean|undefined) {
-        if (!this.buffer) {
+    */
+    public bind(
+        attributeName: string
+    ) : boolean {
+        const gl = this.gl;
+        const shaderProgram = this.shader.getProgram();
+        if (!this.buffer || !shaderProgram) {
             return false;
         }
 
-        // gl.bindAttribLocation(shader.program(), 0, 'aVertexPosition');
-        // gl.enableVertexAttribArray(vertAttribute);
-        // gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        const attributeNo = gl.getAttribLocation(shaderProgram, attributeName);
+        if (attributeNo < 0) {
+            return false;
+        }
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
+        gl.enableVertexAttribArray(attributeNo);
         this.gl.vertexAttribPointer(
-            this.vertAttribute as any,
+            attributeNo,
             this.components,
             this.gl.FLOAT,
             false,
             0,
             0
         );
-        // gl.enableVertexAttribArray(vertAttribute);
+
+        return true;
     }
 
     /**
      * Build the buffer
-     * @private
-     * @param {Array<number>} dataIn
+     * @param {Array<number>} data
      * Zero padded array of indices
-     * @param {string} attrib
-     * Name of the Attribute to bind the buffer to
      * @param {number} dataComponents
      * Mumber of components per. indice
      */
     public build(
-        dataIn: Array<number>,
-        attrib: string,
-        dataComponents?: number
     ): boolean {
-        let farray: (false|Float32Array|undefined);
+        const gl = this.gl;
 
-        this.data = dataIn || [];
-
-        if ((!this.data || this.data.length === 0) && !this.preAllocated) {
+        if (this.typedArray.length === 0) {
             // console.error('trying to render empty vbuffer');
             this.destroy();
             return false;
         }
 
-        this.components = dataComponents || this.components;
-
         if (this.buffer) {
-            this.gl.deleteBuffer(this.buffer);
+            gl.deleteBuffer(this.buffer);
         }
 
-        if (!this.preAllocated) {
-            farray = new Float32Array(this.data);
-        }
-
-        this.buffer = this.gl.createBuffer();
-        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.buffer);
-        this.gl.bufferData(
-            this.gl.ARRAY_BUFFER,
-            (this.preAllocated as any) || (farray as any),
-            this.gl.STATIC_DRAW
-        );
-
-        // gl.bindAttribLocation(shader.program(), 0, 'aVertexPosition');
-        this.vertAttribute = this.gl
-            .getAttribLocation(this.shader.getProgram() as any, attrib);
-        this.gl.enableVertexAttribArray(this.vertAttribute);
-
-        // Trigger cleanup
-        farray = false;
+        this.buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, this.typedArray, gl.STATIC_DRAW);
 
         return true;
     }
@@ -186,34 +152,10 @@ class WGLVertexBuffer {
     public destroy(): void {
         if (this.buffer) {
             this.gl.deleteBuffer(this.buffer);
-            this.buffer = false;
-            this.vertAttribute = false;
+            this.buffer = null;
         }
 
-        this.iterator = 0;
         this.components = this.dataComponents || 2;
-        this.data = [];
-    }
-
-    /**
-     * Adds data to the pre-allocated buffer.
-     * @private
-     * @param {number} x
-     * X data
-     * @param {number} y
-     * Y data
-     * @param {number} a
-     * A data
-     * @param {number} b
-     * B data
-     */
-    public push(x: number, y: number, a: number, b: number): void {
-        if (this.preAllocated) { // && iterator <= preAllocated.length - 4) {
-            this.preAllocated[++this.iterator] = x;
-            this.preAllocated[++this.iterator] = y;
-            this.preAllocated[++this.iterator] = a;
-            this.preAllocated[++this.iterator] = b;
-        }
     }
 
     /**
@@ -232,13 +174,11 @@ class WGLVertexBuffer {
         to: number,
         drawMode: WGLDrawModeValue
     ): boolean {
-        const length = this.preAllocated ?
-            this.preAllocated.length : (this.data as any).length;
-
-        if (!this.buffer) {
+        if (!this.typedArray) {
             return false;
         }
 
+        const length = this.typedArray.length;
         if (!length) {
             return false;
         }
